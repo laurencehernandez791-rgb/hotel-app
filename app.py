@@ -275,7 +275,7 @@ tr:hover td{background:var(--cream)}
 </style>
 </head>
 <body>
-{% if session.user_id %}
+{% if session.user_id and not is_public %}
 <nav>
   <div class="logo">Grand<span>Vista</span></div>
   <div class="nav-links">
@@ -298,6 +298,10 @@ tr:hover td{background:var(--cream)}
       <button class="btn-logout" type="submit">Sign Out</button>
     </form>
   </div>
+</nav>
+{% elif is_public %}
+<nav style="justify-content:center">
+  <div class="logo">Grand<span>Vista</span> Hotel</div>
 </nav>
 {% endif %}
 
@@ -1205,7 +1209,7 @@ def reserve():
         </div>
         """
         
-    return render_template_string(PUBLIC_BOOKING_TPL, rooms=ROOMS)
+    return render_template_string(PUBLIC_BOOKING_TPL, rooms=ROOMS, is_public=True)
 
 # ──────────────────────────────────────────────
 #  ENTRY POINT
