@@ -571,12 +571,21 @@ DASHBOARD_TPL = BASE.replace("{% block body %}{% endblock %}", """
     <div class="stat-card"><div class="stat-label">Total Bookings</div><div class="stat-val">{{ stats.total }}</div></div>
     <div class="stat-card"><div class="stat-label">Checked In</div><div class="stat-val gold">{{ stats.checkin }}</div></div>
     <div class="stat-card"><div class="stat-label">Pending</div><div class="stat-val">{{ stats.pending }}</div></div>
-    <div class="stat-card"><div class="stat-label">Total Revenue</div><div class="stat-val gold" style="font-size:16px">{{ stats.revenue }}</div></div>
+    <div class="stat-card"><div class="stat-label">Total Revenue</div><div class="stat-val gold" style="font-size:16px">₱{{ stats.revenue }}</div></div>
   </div>
+  
+  <p style="font-family:'Playfair Display',serif;font-size:16px;margin-bottom:1rem">Booking Sources</p>
   <div class="stats-grid">
-    <div class="stat-card"><div class="stat-label">Online Bookings</div><div class="stat-val" style="color:var(--gold)">{{ stats.online }}</div></div>
-    <div class="stat-card"><div class="stat-label">Walk-in Bookings</div><div class="stat-val">{{ stats.walkin }}</div></div>
+    <div class="stat-card">
+      <div class="stat-label">Online Reservations</div>
+      <div class="stat-val" style="color:var(--gold)">{{ stats.online }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Walk-in Bookings</div>
+      <div class="stat-val">{{ stats.walkin }}</div>
+    </div>
   </div>
+  
   <p style="font-family:'Playfair Display',serif;font-size:16px;margin-bottom:1rem">Revenue Breakdown</p>
   <div class="stats-grid">
     <a href="{{ url_for('bookings', pay='Cash') }}" class="stat-card" style="text-decoration:none;display:block">
