@@ -7,18 +7,16 @@ app = Flask(__name__)
 app.secret_key = "grandvista-2024"
 DB_FILE = os.path.join(os.path.dirname(__file__), "hotel.db")
 
-ROOMS = [
-    {"id": 1, "type": "Deluxe Room",   "price": 4500,  "capacity": 30},
-    {"id": 2, "type": "Junior Suite",  "price": 7800,  "capacity": 30},
-    {"id": 3, "type": "Premier Ocean", "price": 9500,  "capacity": 30},
-    {"id": 4, "type": "Family Suite",  "price": 11200, "capacity": 30},
+# Rooms will be loaded from DB, but we keep these as defaults for first-time setup
+DEFAULT_ROOMS = [
+    {"type": "Deluxe Room",   "price": 4500,  "capacity": 30, "features": "King Bed, WiFi, AC, Smart TV"},
+    {"type": "Junior Suite",  "price": 7800,  "capacity": 30, "features": "City View, WiFi, AC, Mini Bar"},
+    {"type": "Premier Ocean", "price": 9500,  "capacity": 30, "features": "Ocean View, Balcony, WiFi, AC"},
+    {"type": "Family Suite",  "price": 11200, "capacity": 30, "features": "2 Bedrooms, Kitchenette, WiFi, AC"},
 ]
 AMENITIES = [
-    {"id": "bf",   "name": "Breakfast",       "price": 800},
-    {"id": "ap",   "name": "Airport Transfer", "price": 1200},
     {"id": "sp",   "name": "Spa Access",       "price": 1500},
     {"id": "late", "name": "Late Check-out",   "price": 500},
-    {"id": "pk",   "name": "Parking",          "price": 400},
 ]
 
 # ──────────────────────────────────────────────
@@ -72,7 +70,35 @@ def init_db():
     try:
         conn.execute("ALTER TABLE bookings ADD COLUMN booking_type TEXT DEFAULT 'Walk-in'")
     except sqlite3.OperationalError: pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rooms (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            type       TEXT NOT NULL,
+            price      INTEGER NOT NULL,
+            capacity   INTEGER NOT NULL,
+            status     TEXT DEFAULT 'Clean', -- Clean, Dirty, Maintenance
+            features   TEXT DEFAULT ''
+        )
+    """)
+    try:
+        conn.execute("ALTER TABLE rooms ADD COLUMN features TEXT DEFAULT ''")
+    except sqlite3.OperationalError: pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user       TEXT NOT NULL,
+            action     TEXT NOT NULL,
+            timestamp  TEXT NOT NULL
+        )
+    """)
     conn.commit()
+    
+    # Seed default rooms if empty
+    if conn.execute("SELECT COUNT(*) FROM rooms").fetchone()[0] == 0:
+        for r in DEFAULT_ROOMS:
+            conn.execute("INSERT INTO rooms (type, price, capacity, features) VALUES (?,?,?,?)", (r['type'], r['price'], r['capacity'], r['features']))
+        conn.commit()
+
     # Seed default admin account if no users exist
     if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         conn.execute("""
@@ -81,6 +107,19 @@ def init_db():
         """, ("admin", "Admin User", "admin@grandvista.com", hash_pw("admin123"), "Admin", datetime.now().isoformat()))
         conn.commit()
     conn.close()
+
+def log_action(action):
+    user = session.get("username", "System")
+    conn = get_db()
+    conn.execute("INSERT INTO logs (user, action, timestamp) VALUES (?,?,?)", (user, action, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_rooms():
+    conn = get_db()
+    rooms = conn.execute("SELECT * FROM rooms").fetchall()
+    conn.close()
+    return rooms
 
 def rand_ref():
     return "GVH-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
@@ -101,7 +140,7 @@ def admin_required(f):
             return redirect(url_for("login"))
         if session.get("role") != "Admin":
             flash("Admin access required.", "danger")
-            return redirect(url_for("dashboard"))
+            return redirect(url_for("bookings"))
         return f(*args, **kwargs)
     return wrapper
 
@@ -217,6 +256,9 @@ tr:hover td{background:var(--cream)}
 .badge-Confirmed{background:#EAF3DE;color:#3B6D11}
 .badge-Cancelled{background:#FCEBEB;color:#A32D2D}
 .badge-Checked{background:#E6F1FB;color:#185FA5}
+.badge-room-Clean{background:#EAF3DE;color:#3B6D11}
+.badge-room-Dirty{background:#FCEBEB;color:#A32D2D}
+.badge-room-Maintenance{background:#FFF5E6;color:#B8974A}
 
 /* ── STATS ── */
 .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:1.5rem}
@@ -272,6 +314,15 @@ tr:hover td{background:var(--cream)}
   .form-grid{grid-template-columns:1fr}
   .user-info{display:none}
 }
+
+/* ── ROOM SUMMARY ── */
+.room-summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:1.5rem}
+.room-summary-card{background:var(--white);border:1px solid var(--border);border-radius:var(--r);padding:14px;display:flex;flex-direction:column;transition:all .2s}
+.room-summary-card:hover{border-color:var(--gold);transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,0.05)}
+.room-sum-type{font-family:'Playfair Display',serif;font-size:15px;font-weight:600;margin-bottom:2px}
+.room-sum-price{font-size:13px;color:var(--gold);font-weight:500}
+.room-sum-meta{margin-top:12px;display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);padding-top:10px;border-top:1px solid var(--border)}
+.room-sum-avail{color:var(--success);font-weight:600}
 </style>
 </head>
 <body>
@@ -279,11 +330,14 @@ tr:hover td{background:var(--cream)}
 <nav>
   <div class="logo">Grand<span>Vista</span></div>
   <div class="nav-links">
+    {% if session.role == 'Admin' %}
     <a href="{{ url_for('dashboard') }}" class="{{ 'active' if active=='dashboard' }}">Dashboard</a>
+    {% endif %}
     <a href="{{ url_for('new_booking') }}" class="{{ 'active' if active=='new' }}">New Booking</a>
-    <a href="{{ url_for('bookings') }}" class="{{ 'active' if active=='bookings' }}">Bookings</a>
     {% if session.role == 'Admin' %}
     <a href="{{ url_for('users') }}" class="{{ 'active' if active=='users' }}">Users</a>
+    <a href="{{ url_for('admin_rooms') }}" class="{{ 'active' if active=='rooms' }}">Rooms</a>
+    <a href="{{ url_for('admin_logs') }}" class="{{ 'active' if active=='logs' }}">Logs</a>
     {% endif %}
   </div>
   <div class="nav-right">
@@ -428,7 +482,9 @@ LOGIN_TPL = BASE.replace("{% block body %}{% endblock %}", """
 @app.route("/", methods=["GET","POST"])
 def login():
     if session.get("user_id"):
-        return redirect(url_for("dashboard"))
+        if session.get("role") == "Admin":
+            return redirect(url_for("dashboard"))
+        return redirect(url_for("bookings"))
     form = {"username": ""}
     if request.method == "POST":
         username = request.form.get("username","").strip()
@@ -448,7 +504,11 @@ def login():
                 session["username"]  = user["username"]
                 session["full_name"] = user["full_name"]
                 session["role"]      = user["role"]
-                return redirect(url_for("dashboard"))
+                if user["role"] == "Admin":
+                    log_action("Admin Logged In")
+                    return redirect(url_for("dashboard"))
+                log_action("Staff Logged In")
+                return redirect(url_for("new_booking"))
             flash("Incorrect username or password.", "danger")
     return render_template_string(LOGIN_TPL, form=form, active=None)
 
@@ -568,21 +628,23 @@ DASHBOARD_TPL = BASE.replace("{% block body %}{% endblock %}", """
 <div class="page">
   <p class="page-title">Dashboard</p>
   <div class="stats-grid">
-    <div class="stat-card"><div class="stat-label">Total Bookings</div><div class="stat-val">{{ stats.total }}</div></div>
-    <div class="stat-card"><div class="stat-label">Checked In</div><div class="stat-val gold">{{ stats.checkin }}</div></div>
-    <div class="stat-card"><div class="stat-label">Pending</div><div class="stat-val">{{ stats.pending }}</div></div>
-    <div class="stat-card"><div class="stat-label">Total Revenue</div><div class="stat-val gold" style="font-size:16px">₱{{ stats.revenue }}</div></div>
+    <div class="stat-card"><div class="stat-label">Total Revenue</div><div class="stat-val gold" style="font-size:22px">₱{{ stats.revenue }}</div></div>
   </div>
+
   
-  <p style="font-family:'Playfair Display',serif;font-size:16px;margin-bottom:1rem">Booking Sources</p>
+  <p style="font-family:'Playfair Display',serif;font-size:16px;margin-bottom:1rem">Housekeeping (Room Status)</p>
   <div class="stats-grid">
     <div class="stat-card">
-      <div class="stat-label">Online Reservations</div>
-      <div class="stat-val" style="color:var(--gold)">{{ stats.online }}</div>
+      <div class="stat-label">Clean</div>
+      <div class="stat-val" style="color:var(--success)">{{ stats.room_status.get('Clean', 0) }}</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Walk-in Bookings</div>
-      <div class="stat-val">{{ stats.walkin }}</div>
+      <div class="stat-label">Dirty</div>
+      <div class="stat-val" style="color:var(--danger)">{{ stats.room_status.get('Dirty', 0) }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Under Maintenance</div>
+      <div class="stat-val" style="color:var(--gold)">{{ stats.room_status.get('Maintenance', 0) }}</div>
     </div>
   </div>
   
@@ -592,41 +654,14 @@ DASHBOARD_TPL = BASE.replace("{% block body %}{% endblock %}", """
       <div class="stat-label">Cash Total</div>
       <div class="stat-val" style="font-size:18px">₱{{ stats.rev_cash }}</div>
     </a>
-    <a href="{{ url_for('bookings', pay='GCash') }}" class="stat-card" style="text-decoration:none;display:block">
-      <div class="stat-label">GCash Total</div>
-      <div class="stat-val" style="font-size:18px">₱{{ stats.rev_gcash }}</div>
-    </a>
     <a href="{{ url_for('bookings', pay='Card') }}" class="stat-card" style="text-decoration:none;display:block">
       <div class="stat-label">Card Total</div>
       <div class="stat-val" style="font-size:18px">₱{{ stats.rev_card }}</div>
     </a>
   </div>
-  <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
-      <p style="font-family:'Playfair Display',serif;font-size:16px">Recent Bookings</p>
-      <a href="{{ url_for('bookings') }}" style="font-size:12px">View all →</a>
-    </div>
-    {% if bookings %}
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Ref</th><th>Guest</th><th>Room</th><th>Check-in</th><th>Total</th><th>Pay</th><th>Status</th><th></th></tr></thead>
-      <tbody>
-      {% for b in bookings %}
-      <tr>
-        <td><code style="font-size:12px">{{ b['ref'] }}</code></td>
-        <td>{{ b['fname'] }} {{ b['lname'] }}</td>
-        <td>{{ b['room_type'] }}</td>
-        <td>{{ b['checkin'] }}</td>
-        <td>₱{{ "{:,.2f}".format(b['total']) }}</td>
-        <td><span style="font-size:11px;color:var(--muted)">{{ b['payment_method'] }}</span></td>
-        <td><span class="badge badge-{{ b['status'].split()[0] }}">{{ b['status'] }}</span></td>
-        <td><a href="{{ url_for('view_booking', ref=b['ref']) }}" class="btn btn-secondary" style="padding:3px 10px;font-size:11px">View</a></td>
-      </tr>
-      {% endfor %}
-      </tbody>
-    </table></div>
-    {% else %}<div class="empty">No bookings yet. <a href="{{ url_for('new_booking') }}">Create one →</a></div>{% endif %}
   </div>
 </div>
+
 """)
 
 @app.get("/test")
@@ -634,7 +669,7 @@ def test_route():
     return "<h1>GrandVista Server is Online!</h1><p>If you see this, the server is working correctly.</p>"
 
 @app.get("/dashboard")
-@login_required
+@admin_required
 def dashboard():
     conn    = get_db()
     total   = conn.execute("SELECT COUNT(*) FROM bookings").fetchone()[0]
@@ -644,7 +679,6 @@ def dashboard():
     
     # Revenue Breakdown
     rev_cash  = conn.execute("SELECT SUM(total) FROM bookings WHERE status!='Cancelled' AND payment_method='Cash'").fetchone()[0] or 0
-    rev_gcash = conn.execute("SELECT SUM(total) FROM bookings WHERE status!='Cancelled' AND payment_method='GCash'").fetchone()[0] or 0
     rev_card  = conn.execute("SELECT SUM(total) FROM bookings WHERE status!='Cancelled' AND payment_method='Card'").fetchone()[0] or 0
     
     # Booking Types Breakdown
@@ -652,98 +686,26 @@ def dashboard():
     walkin  = conn.execute("SELECT COUNT(*) FROM bookings WHERE booking_type='Walk-in'").fetchone()[0]
     
     recent  = conn.execute("SELECT * FROM bookings ORDER BY created_at DESC LIMIT 10").fetchall()
+    
+    # Room Status for Dashboard
+    room_stats = conn.execute("SELECT status, COUNT(*) as count FROM rooms GROUP BY status").fetchall()
+    
     conn.close()
     stats = {
         "total":total, "checkin":checkin, "pending":pending, "revenue":f"{rev:,.2f}",
-        "rev_cash": f"{rev_cash:,.2f}", "rev_gcash": f"{rev_gcash:,.2f}", "rev_card": f"{rev_card:,.2f}",
-        "online": online, "walkin": walkin
+        "rev_cash": f"{rev_cash:,.2f}", "rev_card": f"{rev_card:,.2f}",
+        "online": online, "walkin": walkin,
+        "room_status": {r['status']: r['count'] for r in room_stats}
     }
     return render_template_string(DASHBOARD_TPL, stats=stats, bookings=recent, active="dashboard")
 
-
-# ──────────────────────────────────────────────
-#  ALL BOOKINGS
-# ──────────────────────────────────────────────
-
-BOOKINGS_TPL = BASE.replace("{% block body %}{% endblock %}", """
-<div class="page">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
-    <p class="page-title" style="margin:0">All Bookings</p>
-    <div style="display:flex;gap:10px">
-      <a href="{{ url_for('export_bookings') }}" class="btn btn-secondary" style="background:#2ecc71;color:white;border:none">Download Excel (CSV)</a>
-      <a href="{{ url_for('new_booking') }}" class="btn btn-primary">+ New Booking</a>
-    </div>
-  </div>
-  <div class="card">
-    <form method="get" style="display:flex;gap:10px;margin-bottom:1rem;flex-wrap:wrap">
-      <input name="q" placeholder="Search name or ref…" value="{{ q }}"
-        style="flex:1;min-width:160px;padding:8px 12px;font-family:'DM Sans',sans-serif;font-size:13px;
-        border:1px solid var(--border);border-radius:var(--r);background:var(--cream);color:var(--text);outline:none"/>
-      <select name="status" style="padding:8px 12px;font-family:'DM Sans',sans-serif;font-size:13px;
-        border:1px solid var(--border);border-radius:var(--r);background:var(--cream);color:var(--text);outline:none">
-        <option value="">All Status</option>
-        {% for s in ['Pending','Confirmed','Checked In','Cancelled'] %}
-        <option value="{{ s }}" {{ 'selected' if status==s }}>{{ s }}</option>
-        {% endfor %}
-      </select>
-      <select name="pay" style="padding:8px 12px;font-family:'DM Sans',sans-serif;font-size:13px;
-        border:1px solid var(--border);border-radius:var(--r);background:var(--cream);color:var(--text);outline:none">
-        <option value="">All Payments</option>
-        {% for p in ['Cash','GCash','Card'] %}
-        <option value="{{ p }}" {{ 'selected' if pay==p }}>{{ p }}</option>
-        {% endfor %}
-      </select>
-      <button class="btn btn-secondary" type="submit">Filter</button>
-    </form>
-    {% if bookings %}
-    <div class="tbl-wrap"><table>
-      <thead><tr><th>Ref</th><th>Guest</th><th>Room</th><th>Check-in</th><th>Total</th><th>Pay</th><th>Status</th><th></th></tr></thead>
-      <tbody>
-      {% for b in bookings %}
-      <tr>
-        <td><code style="font-size:12px">{{ b['ref'] }}</code></td>
-        <td>{{ b['fname'] }} {{ b['lname'] }}</td>
-        <td>{{ b['room_type'] }}</td>
-        <td>{{ b['checkin'] }}</td>
-        <td>₱{{ "{:,.2f}".format(b['total']) }}</td>
-        <td><span style="font-size:11px;color:var(--muted)">{{ b['payment_method'] }}</span></td>
-        <td><span class="badge badge-{{ b['status'].split()[0] }}">{{ b['status'] }}</span></td>
-        <td><a href="{{ url_for('view_booking', ref=b['ref']) }}" class="btn btn-secondary" style="padding:3px 10px;font-size:11px">View</a></td>
-      </tr>
-      {% endfor %}
-      </tbody>
-    </table></div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:1rem">
-      <p style="font-size:12px;color:var(--muted)">{{ bookings|length }} booking(s) found</p>
-      <p style="font-size:14px;font-weight:500">Filtered Total: <span style="color:var(--gold)">₱{{ "{:,.2f}".format(bookings|sum(attribute='total')) }}</span></p>
-    </div>
-    {% else %}<div class="empty">No bookings found.</div>{% endif %}
-  </div>
-</div>
-""")
-
-@app.get("/bookings")
+@app.route("/bookings")
 @login_required
 def bookings():
-    q      = request.args.get("q","").strip()
-    status = request.args.get("status","")
-    pay    = request.args.get("pay","")
-    conn   = get_db()
-    sql    = "SELECT * FROM bookings WHERE 1=1"
-    params = []
-    if q:
-        sql += " AND (lower(fname)||' '||lower(lname) LIKE ? OR lower(ref) LIKE ?)"
-        params += [f"%{q.lower()}%", f"%{q.lower()}%"]
-    if status:
-        sql += " AND status=?"
-        params.append(status)
-    if pay:
-        sql += " AND payment_method=?"
-        params.append(pay)
-    sql += " ORDER BY created_at DESC"
-    rows = conn.execute(sql, params).fetchall()
-    conn.close()
-    return render_template_string(BOOKINGS_TPL, bookings=rows, q=q, status=status, pay=pay, active="bookings")
+    return redirect(url_for("new_booking"))
+
+
+
 
 
 # ──────────────────────────────────────────────
@@ -752,8 +714,9 @@ def bookings():
 
 VIEW_TPL = BASE.replace("{% block body %}{% endblock %}", """
 <div class="page">
-  <div style="margin-bottom:1rem">
-    <a href="{{ url_for('bookings') }}" class="btn btn-secondary" style="padding:5px 14px;font-size:12px">← Back</a>
+  <div style="margin-bottom:1rem; display:flex; justify-content:space-between; align-items:center;">
+    <a href="{{ url_for('dashboard') if session.role == 'Admin' else url_for('new_booking') }}" class="btn btn-secondary" style="padding:5px 14px;font-size:12px">← Back</a>
+    <a href="{{ url_for('booking_receipt', ref=b['ref']) }}" target="_blank" class="btn btn-secondary" style="font-size:12px">📄 Print Receipt</a>
   </div>
   <p class="page-title">Booking: {{ b['ref'] }}</p>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
@@ -821,6 +784,7 @@ def view_booking(ref):
         if new_status in ["Pending","Confirmed","Checked In","Cancelled"]:
             conn.execute("UPDATE bookings SET status=? WHERE ref=?", (new_status, ref))
             conn.commit()
+            log_action(f"Updated booking {ref} status to {new_status}")
             flash(f"Status updated to '{new_status}'.", "success")
     b = conn.execute("SELECT * FROM bookings WHERE ref=?", (ref,)).fetchone()
     conn.close()
@@ -831,12 +795,86 @@ def view_booking(ref):
 
 
 # ──────────────────────────────────────────────
+#  RECEIPT / INVOICE
+# ──────────────────────────────────────────────
+
+RECEIPT_TPL = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><title>Receipt - {{ b.ref }}</title>
+<style>
+    body { font-family: 'Courier New', Courier, monospace; color: #333; line-height: 1.4; padding: 40px; }
+    .receipt { max-width: 500px; margin: 0 auto; border: 1px solid #eee; padding: 30px; box-shadow: 0 0 10px rgba(0,0,0,0.05); }
+    .header { text-align: center; margin-bottom: 30px; border-bottom: 2px dashed #eee; padding-bottom: 20px; }
+    .logo { font-size: 24px; font-weight: bold; }
+    .item { display: flex; justify-content: space-between; margin-bottom: 8px; }
+    .total { border-top: 2px dashed #eee; margin-top: 20px; padding-top: 15px; font-size: 18px; font-weight: bold; }
+    .footer { text-align: center; margin-top: 40px; font-size: 12px; color: #888; }
+    @media print { .no-print { display: none; } }
+</style>
+</head>
+<body>
+<div class="no-print" style="text-align:center; margin-bottom: 20px;">
+    <button onclick="window.print()" style="padding:10px 20px; cursor:pointer;">Print Receipt</button>
+</div>
+<div class="receipt">
+    <div class="header">
+        <div class="logo">GRANDVISTA HOTEL</div>
+        <p>123 Luxury Lane, Seaside City<br>Tel: (02) 888-Vista</p>
+        <p style="margin-top:15px;"><strong>OFFICIAL RECEIPT</strong></p>
+    </div>
+    <div class="item"><span>Date:</span> <span>{{ b.created_at[:10] }}</span></div>
+    <div class="item"><span>Ref:</span> <span>{{ b.ref }}</span></div>
+    <div class="item"><span>Guest:</span> <span>{{ b.fname }} {{ b.lname }}</span></div>
+    <hr style="border:0; border-top:1px solid #eee; margin:15px 0;">
+    <div class="item"><span>Room ({{ b.nights }} nights):</span> <span>₱{{ "{:,.2f}".format(b.room_total) }}</span></div>
+    <div class="item"><span>Amenities:</span> <span>₱{{ "{:,.2f}".format(b.amen_total) }}</span></div>
+    <div class="item"><span>Discount ({{ b.discount_type }}):</span> <span>-₱{{ "{:,.2f}".format((b.room_total + b.amen_total) - b.total) }}</span></div>
+    <div class="total"><span>TOTAL:</span> <span>₱{{ "{:,.2f}".format(b.total) }}</span></div>
+    <div class="item" style="margin-top:10px; font-size:12px;"><span>Payment Method:</span> <span>{{ b.payment_method }}</span></div>
+    <div class="footer">
+        <p>Thank you for staying with us!</p>
+        <p>Please come again.</p>
+    </div>
+</div>
+</body>
+</html>"""
+
+@app.route("/bookings/<ref>/receipt")
+@login_required
+def booking_receipt(ref):
+    conn = get_db()
+    b = conn.execute("SELECT * FROM bookings WHERE ref=?", (ref,)).fetchone()
+    conn.close()
+    if not b: return "Booking not found", 404
+    return render_template_string(RECEIPT_TPL, b=b)
+
+
+# ──────────────────────────────────────────────
 #  NEW BOOKING
 # ──────────────────────────────────────────────
 
 NEW_TPL = BASE.replace("{% block body %}{% endblock %}", """
 <div class="page">
   <p class="page-title">New Booking</p>
+  
+  <p style="font-family:'Playfair Display',serif;font-size:16px;margin-bottom:1rem">Room Types & Availability</p>
+  <div class="room-summary-grid">
+    {% for rs in room_summary %}
+    <div class="room-summary-card">
+      <div class="room-sum-type">{{ rs['type'] }}</div>
+      <div class="room-sum-price">₱{{ "{:,.2f}".format(rs['price']) }} <span style="font-size:10px;font-weight:400;color:var(--muted)">/ night</span></div>
+      <div style="font-size:11px; color:var(--muted); margin-top:8px; line-height:1.4">
+        {{ rs['features'] }}
+      </div>
+      <div class="room-sum-meta">
+        <span>Max: {{ rs['capacity'] }} pax</span>
+        <span class="room-sum-avail">{{ rs['clean_units'] }} Available</span>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
   <form method="post">
     <div class="card">
       <p class="form-section">Guest Information</p>
@@ -862,14 +900,13 @@ NEW_TPL = BASE.replace("{% block body %}{% endblock %}", """
         <div class="form-group"><label>Payment Method</label>
           <select name="payment_method">
             <option value="Cash" {{ 'selected' if form.payment_method=='Cash' }}>Cash</option>
-            <option value="GCash" {{ 'selected' if form.payment_method=='GCash' }}>GCash</option>
-            <option value="Card" {{ 'selected' if form.payment_method=='Card' }}>Card</option>
+            <option value="Card" {{ 'selected' if form.payment_method=='Card' }}>Card / Bank Transfer (PayPal/BDO)</option>
           </select>
         </div>
         <div class="form-group"><label>Booking Type</label>
           <select name="booking_type">
-            <option value="Walk-in" {{ 'selected' if form.booking_type=='Walk-in' }}>Walk-in</option>
-            <option value="Online" {{ 'selected' if form.booking_type=='Online' }}>Online Reservation</option>
+            <option value="Walk-in" {{ 'selected' if form.booking_type=='Walk-in' }}>Walk-in (Staff)</option>
+            <option value="Online" {{ 'selected' if form.booking_type=='Online' }}>Online Registration</option>
           </select>
         </div>
       </div>
@@ -916,7 +953,7 @@ NEW_TPL = BASE.replace("{% block body %}{% endblock %}", """
       </div>
     </div>
     <div class="btn-row">
-      <a href="{{ url_for('bookings') }}" class="btn btn-secondary">Cancel</a>
+      <a href="{{ url_for('dashboard') if session.role == 'Admin' else url_for('new_booking') }}" class="btn btn-secondary">Cancel</a>
       <button class="btn btn-primary" type="submit">Confirm Booking</button>
     </div>
   </form>
@@ -927,7 +964,7 @@ NEW_TPL = BASE.replace("{% block body %}{% endblock %}", """
 @login_required
 def new_booking():
     form = {"fname":"","lname":"","email":"","phone":"","adults":"1","children":"0",
-            "checkin":"","checkout":"","room":"","amenities":[],"requests":"","discount_type":"None","payment_method":"Cash","booking_type":"Walk-in"}
+            "checkin":"","checkout":"","room":"","amenities":[],"requests":"","discount_type":"None","payment_method":"Cash"}
     if request.method == "POST":
         form = {k: request.form.get(k,"").strip() for k in ["fname","lname","email","phone","checkin","checkout","room","requests","discount_type","payment_method","booking_type"]}
         form["adults"]    = request.form.get("adults","1")
@@ -982,16 +1019,29 @@ def new_booking():
                   int(form["adults"]), int(form["children"]),
                   room["id"], room["type"], ",".join(form["amenities"]),
                   room_tot, am_tot, total,
-                  "Confirmed", form["discount_type"], form["payment_method"], form["booking_type"], form["requests"], datetime.now().isoformat()))
+                  "Checked In", form["discount_type"], form["payment_method"], form["booking_type"], form["requests"], datetime.now().isoformat()))
             conn.commit()
             conn.close()
             msg = f"Booking created! Reference: {ref}"
             if total_disc > 0: msg += f" ({int(total_disc*100)}% total discount applied!)"
+            log_action(f"Created booking {ref} for {form['fname']} {form['lname']}")
             flash(msg, "success")
             return redirect(url_for("view_booking", ref=ref))
         for e in errors:
             flash(e, "danger")
-    return render_template_string(NEW_TPL, rooms=ROOMS, amenities=AMENITIES, form=form, active="new")
+    
+    conn = get_db()
+    room_summary = conn.execute("""
+        SELECT type, price, capacity, features,
+               COUNT(*) as total_units,
+               SUM(CASE WHEN status='Clean' THEN 1 ELSE 0 END) as clean_units
+        FROM rooms
+        GROUP BY type
+    """).fetchall()
+    all_rooms = conn.execute("SELECT * FROM rooms").fetchall()
+    conn.close()
+    
+    return render_template_string(NEW_TPL, rooms=all_rooms, room_summary=room_summary, amenities=AMENITIES, form=form, active="new")
 
 
 # ──────────────────────────────────────────────
@@ -1089,11 +1139,19 @@ PUBLIC_BOOKING_TPL = BASE.replace("{% block body %}{% endblock %}", """
           </select>
         </div>
         <div class="form-group"><label>Payment Method</label>
-          <select name="payment_method">
-            <option value="GCash">GCash</option>
-            <option value="Card">Card</option>
+          <select name="payment_method" id="pay_method_select">
+            <option value="Card">Card / Bank Transfer</option>
             <option value="Cash">Cash (Upon Arrival)</option>
           </select>
+          <div id="card-details" style="display:block; margin-top:12px; padding:12px; background:var(--light); border:1px solid var(--border); border-radius:var(--r); font-size:12px; color:var(--text)">
+            <p style="font-weight:600; margin-bottom:5px; color:var(--gold-d)">Payment Instructions:</p>
+            <div style="display:grid; gap:4px">
+              <div><strong>PayPal:</strong> payments@grandvistahotel.com</div>
+              <div><strong>BDO:</strong> 00123 456 7890 (GrandVista Hotel)</div>
+              <div><strong>GCash/Maya:</strong> 0912 345 6789</div>
+            </div>
+            <p style="margin-top:8px; font-size:11px; color:var(--muted)">* Please send a screenshot of your receipt to our email after payment.</p>
+          </div>
         </div>
       </div>
     </div>
@@ -1155,6 +1213,13 @@ function calcTotal() {
   document.getElementById('nights-preview').textContent = nights + ' night(s)';
 }
 document.querySelectorAll('input, select').forEach(el => el.addEventListener('change', calcTotal));
+const paySelect = document.getElementById('pay_method_select');
+const cardBox = document.getElementById('card-details');
+if (paySelect && cardBox) {
+  paySelect.addEventListener('change', () => {
+    cardBox.style.display = paySelect.value === 'Card' ? 'block' : 'none';
+  });
+}
 document.querySelectorAll('.room-card').forEach(card => {
   card.addEventListener('click', () => {
     document.querySelectorAll('.room-card').forEach(c => c.classList.remove('checked'));
@@ -1177,7 +1242,7 @@ def reserve():
         checkout = request.form.get("checkout")
         room_id  = int(request.form.get("room"))
         disc_type = request.form.get("discount_type", "None")
-        pay_method = request.form.get("payment_method", "GCash")
+        pay_method = request.form.get("payment_method", "Cash")
         
         # Simple Logic
         room = next((r for r in ROOMS if r["id"] == room_id), ROOMS[0])
@@ -1205,20 +1270,163 @@ def reserve():
             status,discount_type,payment_method,booking_type,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (ref, fname, lname, email, phone, checkin, checkout, nights,
               adults, children, room["id"], room["type"], "", room_tot, 0, total,
-              "Pending", disc_type, pay_method, "Online", datetime.now().isoformat()))
+              "Checked In", disc_type, pay_method, "Online", datetime.now().isoformat()))
         conn.commit()
         conn.close()
         
+        payment_info = ""
+        if pay_method == "Card":
+            payment_info = """
+            <div style="background:#f9f7f2; border:1px solid #e8e4dc; padding:15px; border-radius:8px; margin:20px 0; display:inline-block; text-align:left; font-size:14px;">
+                <p style="font-weight:600; color:#B8974A; margin-bottom:10px;">Payment Instructions (Card/Bank Transfer):</p>
+                <p><strong>PayPal:</strong> payments@grandvistahotel.com</p>
+                <p><strong>BDO:</strong> 00123 456 7890 (GrandVista Hotel)</p>
+                <p><strong>GCash/Maya:</strong> 0912 345 6789</p>
+                <p style="font-size:12px; color:#6B6459; margin-top:10px;">* Please email your proof of payment to booking@grandvistahotel.com</p>
+            </div>
+            """
+
         return f"""
-        <div style="font-family:sans-serif; text-align:center; padding:50px;">
-            <h1 style="color:#d4af37;">Reservation Successful!</h1>
-            <p>Your reference code is: <strong style="font-size:24px;">{ref}</strong></p>
-            <p>Please save this code for your arrival.</p>
-            <a href="/reserve" style="color:#d4af37;">Make another reservation</a>
+        <div style="font-family:sans-serif; text-align:center; padding:50px; background:#FAF8F4; min-height:100vh;">
+            <div style="max-width:600px; margin:0 auto; background:white; padding:40px; border-radius:12px; border:1px solid #e8e4dc; box-shadow:0 4px 20px rgba(0,0,0,0.05);">
+                <h1 style="color:#B8974A; font-family:'Playfair Display',serif; margin-bottom:10px;">Reservation Successful!</h1>
+                <p style="color:#6B6459;">Thank you for choosing GrandVista Hotel.</p>
+                <div style="margin:30px 0; padding:20px; border:2px dashed #B8974A; display:inline-block;">
+                    <p style="font-size:12px; color:#6B6459; text-transform:uppercase; letter-spacing:2px; margin-bottom:5px;">Your Reference Code</p>
+                    <strong style="font-size:32px; color:#1C1A17; letter-spacing:2px;">{ref}</strong>
+                </div>
+                {payment_info}
+                <p style="color:#6B6459; margin-bottom:30px;">Please save this code for your arrival.</p>
+                <a href="/reserve" style="display:inline-block; padding:12px 30px; background:#B8974A; color:white; text-decoration:none; border-radius:8px; font-weight:500;">Make another reservation</a>
+            </div>
         </div>
         """
         
-    return render_template_string(PUBLIC_BOOKING_TPL, rooms=ROOMS, is_public=True)
+    return render_template_string(PUBLIC_BOOKING_TPL, rooms=get_rooms(), is_public=True)
+
+
+# ──────────────────────────────────────────────
+#  ADMIN: ROOM MANAGEMENT
+# ──────────────────────────────────────────────
+
+ADMIN_ROOMS_TPL = BASE.replace("{% block body %}{% endblock %}", """
+<div class="page">
+  <p class="page-title">Room Management</p>
+  <div class="card">
+    <p class="form-section">Add New Room</p>
+    <form method="post" action="{{ url_for('admin_add_room') }}" class="form-grid">
+      <div class="form-group"><label>Room Type</label><input name="type" placeholder="e.g. Presidential Suite" required/></div>
+      <div class="form-group"><label>Price/Night</label><input name="price" type="number" required/></div>
+      <div class="form-group"><label>Capacity</label><input name="capacity" type="number" required/></div>
+      <div class="form-group" style="display:flex;align-items:flex-end">
+        <button class="btn btn-primary" type="submit">+ Add Room</button>
+      </div>
+    </form>
+  </div>
+  <div class="card">
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>ID</th><th>Type</th><th>Price</th><th>Cap</th><th>Status</th><th>Action</th></tr></thead>
+      <tbody>
+      {% for r in rooms %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td><strong>{{ r.type }}</strong></td>
+        <td>₱{{ "{:,}".format(r.price) }}</td>
+        <td>{{ r.capacity }}</td>
+        <td>
+            <form method="post" action="{{ url_for('admin_update_room_status', rid=r.id) }}" style="margin:0">
+                <select name="status" onchange="this.form.submit()" style="font-size:11px; padding:2px 5px; border-radius:4px;">
+                    <option value="Clean" {{ 'selected' if r.status=='Clean' }}>Clean</option>
+                    <option value="Dirty" {{ 'selected' if r.status=='Dirty' }}>Dirty</option>
+                    <option value="Maintenance" {{ 'selected' if r.status=='Maintenance' }}>Repair</option>
+                </select>
+            </form>
+        </td>
+        <td>
+          <form method="post" action="{{ url_for('admin_delete_room', rid=r.id) }}" onsubmit="return confirm('Delete this room?')">
+            <button class="btn btn-danger" style="padding:3px 10px; font-size:11px;">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </div>
+</div>
+""")
+
+@app.get("/admin/rooms")
+@admin_required
+def admin_rooms():
+    return render_template_string(ADMIN_ROOMS_TPL, rooms=get_rooms(), active="rooms")
+
+@app.post("/admin/rooms/add")
+@admin_required
+def admin_add_room():
+    t, p, c = request.form.get("type"), request.form.get("price"), request.form.get("capacity")
+    conn = get_db()
+    conn.execute("INSERT INTO rooms (type, price, capacity) VALUES (?,?,?)", (t, p, c))
+    conn.commit()
+    conn.close()
+    log_action(f"Added new room type: {t}")
+    flash("Room added successfully.", "success")
+    return redirect(url_for("admin_rooms"))
+
+@app.post("/admin/rooms/<int:rid>/status")
+@login_required
+def admin_update_room_status(rid):
+    new_status = request.form.get("status")
+    conn = get_db()
+    conn.execute("UPDATE rooms SET status=? WHERE id=?", (new_status, rid))
+    conn.commit()
+    conn.close()
+    log_action(f"Updated room #{rid} status to {new_status}")
+    flash("Room status updated.", "success")
+    return redirect(request.referrer or url_for("admin_rooms"))
+
+@app.post("/admin/rooms/<int:rid>/delete")
+@admin_required
+def admin_delete_room(rid):
+    conn = get_db()
+    conn.execute("DELETE FROM rooms WHERE id=?", (rid,))
+    conn.commit()
+    conn.close()
+    log_action(f"Deleted room #{rid}")
+    flash("Room deleted.", "info")
+    return redirect(url_for("admin_rooms"))
+
+
+# ──────────────────────────────────────────────
+#  ADMIN: LOGS
+# ──────────────────────────────────────────────
+
+LOGS_TPL = BASE.replace("{% block body %}{% endblock %}", """
+<div class="page">
+  <p class="page-title">Activity Logs</p>
+  <div class="card">
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>User</th><th>Action</th><th>Time</th></tr></thead>
+      <tbody>
+      {% for l in logs %}
+      <tr>
+        <td style="font-weight:500">{{ l.user }}</td>
+        <td>{{ l.action }}</td>
+        <td style="color:var(--muted); font-size:12px;">{{ l.timestamp.replace('T', ' ')[:19] }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </div>
+</div>
+""")
+
+@app.get("/admin/logs")
+@admin_required
+def admin_logs():
+    conn = get_db()
+    logs = conn.execute("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 200").fetchall()
+    conn.close()
+    return render_template_string(LOGS_TPL, logs=logs, active="logs")
 
 # ──────────────────────────────────────────────
 #  ENTRY POINT
